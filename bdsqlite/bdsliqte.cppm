@@ -128,17 +128,60 @@ inline std::string ToInsertString(const T& t, const std::string& tableName, cons
 	return query;
 }
 
+void bind_cell(SQLite::Statement& stat, int i, int v) { stat.bind(i, v); }
+void bind_cell(SQLite::Statement& stat, int i, float v) { stat.bind(i, v); }
+void bind_cell(SQLite::Statement& stat, int i, double v) { stat.bind(i, v); }
+void bind_cell(SQLite::Statement& stat, int i, std::string v) { stat.bind(i, v); }
+void bind_cell(SQLite::Statement& stat, int i, std::chrono::system_clock::time_point v) { stat.bind(i, std::chrono::duration_cast<std::chrono::seconds>(v.time_since_epoch()).count()); }
+
+void bind_cell(SQLite::Statement& stat, int i, std::optional<int> v) { if (v.has_value()) stat.bind(i, v.value()); }
+void bind_cell(SQLite::Statement& stat, int i, std::optional<float> v) { if (v.has_value()) stat.bind(i, v.value()); }
+void bind_cell(SQLite::Statement& stat, int i, std::optional<double> v) { if (v.has_value()) stat.bind(i, v.value()); }
+void bind_cell(SQLite::Statement& stat, int i, std::optional<std::string> v) { if (v.has_value()) stat.bind(i, v.value()); }
+void bind_cell(SQLite::Statement& stat, int i, std::optional<std::chrono::system_clock::time_point> v) { if (v.has_value()) stat.bind(i, std::chrono::duration_cast<std::chrono::seconds>(v.value().time_since_epoch()).count()); }
+
+template<typename T>
+void statement_bind(const T& t, SQLite::Statement& row) {
+	using namespace boost::describe;
+
+	using Bd = describe_bases<T, mod_any_access>;
+	using Md = describe_members<T, mod_any_access>;
+	int i = 1;
+	boost::mp11::mp_for_each<Md>([&](auto D) {
+		bind_cell(row, i, t.*D.pointer);
+	i++;
+		});
+}
+
 template<typename T>
 inline void ReplaceInto(SQLite::Database& db, const std::string& tableName, const T& value) {
-	std::string query;
+	using namespace boost::describe;
+	using Bd = describe_bases<T, mod_any_access>;
+	using Md = describe_members<T, mod_any_access>;
+	std::string insert_str = fmt::format("INSERT INTO {0} VALUES (", tableName);
+	boost::mp11::mp_for_each<Md>([&](auto D) {
+		insert_str += "?,";
+		});
+	insert_str.pop_back();
+	insert_str += ")";
 	try {
-		query = ToInsertString(value, tableName, "REPLACE INTO");
-		db.exec(query);
+		SQLite::Statement query{ db, insert_str };
+		statement_bind(value, query);
+		query.exec();
+		query.reset();
 	}
 	catch (std::exception e) {
 		std::cout << e.what() << "\n" << "error from ReplaceInto:\n";
-		std::cout << query << "\n";
 	}
+}
+
+template<typename T>
+inline void ReplaceInto(SQLite::Database& db, const std::string& tableName, const std::vector<T>& values) {
+	db.exec("BEGIN TRANSACTION;");
+	for (auto& value : values) {
+		ReplaceInto(db, tableName, value);
+	}
+	db.exec("END TRANSACTION;");
 }
 
 template<typename T>
@@ -154,11 +197,17 @@ std::vector<T> Select(SQLite::Database& db, const std::string& tableName, const 
 
 	std::vector<T> ret;
 
-	SQLite::Statement stmt(db, query);
-	while (stmt.executeStep()) {
-		T object;
-		read_row(object, stmt);
-		ret.push_back(object);
+	try {
+		SQLite::Statement stmt(db, query);
+		while (stmt.executeStep()) {
+			T object;
+			read_row(object, stmt);
+			ret.push_back(object);
+		}
+	}
+	catch (std::exception e) {
+		std::cout << e.what() << "\n" << "error from Select:\n";
+		std::cout << query << "\n";
 	}
 	return ret;
 }
